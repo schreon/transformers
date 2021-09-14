@@ -13,28 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
- PyTorch DistilBERT model adapted in part from Facebook, Inc XLM model (https://github.com/facebookresearch/XLM) and in
+ PyTorch DistilBERTPerformer model adapted in part from Facebook, Inc XLM model (https://github.com/facebookresearch/XLM) and in
  part from HuggingFace PyTorch version of Google AI Bert model (https://github.com/google-research/bert)
 """
 
 
+import copy
 import math
 
 import numpy as np
 import torch
-from packaging import version
-from torch import nn
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+import torch.nn as nn
+from torch.nn import CrossEntropyLoss
 
-from ...activations import gelu
-from ...deepspeed import is_deepspeed_zero3_enabled
-from ...file_utils import (
+from ....activations import gelu
+from ....file_utils import (
     add_code_sample_docstrings,
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
     replace_return_docstrings,
 )
-from ...modeling_outputs import (
+from ....modeling_outputs import (
     BaseModelOutput,
     MaskedLMOutput,
     MultipleChoiceModelOutput,
@@ -42,19 +41,20 @@ from ...modeling_outputs import (
     SequenceClassifierOutput,
     TokenClassifierOutput,
 )
-from ...modeling_utils import (
+from ....modeling_utils import (
     PreTrainedModel,
     apply_chunking_to_forward,
     find_pruneable_heads_and_indices,
     prune_linear_layer,
 )
-from ...utils import logging
-from .configuration_distilbert import DistilBertConfig
+from ....utils import logging
+from .configuration_distilbert_performer import DistilBertPerformerConfig
+from ..modeling_performer_attention import PerformerAttention
 
 
 logger = logging.get_logger(__name__)
-_CHECKPOINT_FOR_DOC = "distilbert-base-uncased"
-_CONFIG_FOR_DOC = "DistilBertConfig"
+
+_CONFIG_FOR_DOC = "DistilBertPerformerConfig"
 _TOKENIZER_FOR_DOC = "DistilBertTokenizer"
 
 DISTILBERT_PRETRAINED_MODEL_ARCHIVE_LIST = [
@@ -74,10 +74,10 @@ DISTILBERT_PRETRAINED_MODEL_ARCHIVE_LIST = [
 
 def create_sinusoidal_embeddings(n_pos, dim, out):
     position_enc = np.array([[pos / np.power(10000, 2 * (j // 2) / dim) for j in range(dim)] for pos in range(n_pos)])
-    out.requires_grad = False
     out[:, 0::2] = torch.FloatTensor(np.sin(position_enc[:, 0::2]))
     out[:, 1::2] = torch.FloatTensor(np.cos(position_enc[:, 1::2]))
     out.detach_()
+    out.requires_grad = False
 
 
 class Embeddings(nn.Module):
@@ -86,26 +86,12 @@ class Embeddings(nn.Module):
         self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         if config.sinusoidal_pos_embds:
-
-            if is_deepspeed_zero3_enabled():
-                import deepspeed
-
-                with deepspeed.zero.GatheredParameters(self.position_embeddings.weight, modifier_rank=0):
-                    if torch.distributed.get_rank() == 0:
-                        create_sinusoidal_embeddings(
-                            n_pos=config.max_position_embeddings, dim=config.hidden_size, out=self.position_embeddings.weight
-                        )
-            else:
-                create_sinusoidal_embeddings(
-                    n_pos=config.max_position_embeddings, dim=config.hidden_size, out=self.position_embeddings.weight
-                )
+            create_sinusoidal_embeddings(
+                n_pos=config.max_position_embeddings, dim=config.hidden_size, out=self.position_embeddings.weight
+            )
 
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=1e-12)
         self.dropout = nn.Dropout(config.dropout)
-        if version.parse(torch.__version__) > version.parse("1.6.0"):
-            self.register_buffer(
-                "position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)), persistent=False
-            )
 
     def forward(self, input_ids):
         """
@@ -116,15 +102,8 @@ class Embeddings(nn.Module):
         embeddings)
         """
         seq_length = input_ids.size(1)
-
-        # Setting the position-ids to the registered buffer in constructor, it helps
-        # when tracing the model without passing position-ids, solves
-        # isues similar to issue #5664
-        if hasattr(self, "position_ids"):
-            position_ids = self.position_ids[:, :seq_length]
-        else:
-            position_ids = torch.arange(seq_length, dtype=torch.long, device=input_ids.device)  # (max_seq_length)
-            position_ids = position_ids.unsqueeze(0).expand_as(input_ids)  # (bs, max_seq_length)
+        position_ids = torch.arange(seq_length, dtype=torch.long, device=input_ids.device)  # (max_seq_length)
+        position_ids = position_ids.unsqueeze(0).expand_as(input_ids)  # (bs, max_seq_length)
 
         word_embeddings = self.word_embeddings(input_ids)  # (bs, max_seq_length, dim)
         position_embeddings = self.position_embeddings(position_ids)  # (bs, max_seq_length, dim)
@@ -149,6 +128,8 @@ class MultiHeadSelfAttention(nn.Module):
         self.k_lin = nn.Linear(in_features=config.hidden_size, out_features=config.hidden_size)
         self.v_lin = nn.Linear(in_features=config.hidden_size, out_features=config.hidden_size)
         self.out_lin = nn.Linear(in_features=config.hidden_size, out_features=config.hidden_size)
+
+        self.performer_attention = PerformerAttention(config.performer_attention_config)
 
         self.pruned_heads = set()
 
@@ -181,45 +162,46 @@ class MultiHeadSelfAttention(nn.Module):
         """
         bs, q_length, dim = query.size()
         k_length = key.size(1)
-        # assert dim == self.dim, f'Dimensions do not match: {dim} input vs {self.dim} configured'
+        # assert dim == self.dim, 'Dimensions do not match: %s input vs %s configured' % (dim, self.dim)
         # assert key.size() == value.size()
 
         dim_per_head = self.dim // self.n_heads
 
-        mask_reshp = (bs, 1, 1, k_length)
+        mask_reshp = (bs, 1, k_length, 1) # Shape for Performer
 
         def shape(x):
-            """separate heads"""
+            """ separate heads """
             return x.view(bs, -1, self.n_heads, dim_per_head).transpose(1, 2)
 
         def unshape(x):
-            """group heads"""
+            """ group heads """
             return x.transpose(1, 2).contiguous().view(bs, -1, self.n_heads * dim_per_head)
 
         q = shape(self.q_lin(query))  # (bs, n_heads, q_length, dim_per_head)
         k = shape(self.k_lin(key))  # (bs, n_heads, k_length, dim_per_head)
         v = shape(self.v_lin(value))  # (bs, n_heads, k_length, dim_per_head)
 
-        q = q / math.sqrt(dim_per_head)  # (bs, n_heads, q_length, dim_per_head)
-        scores = torch.matmul(q, k.transpose(2, 3))  # (bs, n_heads, q_length, k_length)
-        mask = (mask == 0).view(mask_reshp).expand_as(scores)  # (bs, n_heads, q_length, k_length)
-        scores.masked_fill_(mask, -float("inf"))  # (bs, n_heads, q_length, k_length)
+        mask = mask.view(mask_reshp)  # (bs, n_heads, q_length, k_length)
 
-        weights = nn.Softmax(dim=-1)(scores)  # (bs, n_heads, q_length, k_length)
-        weights = self.dropout(weights)  # (bs, n_heads, q_length, k_length)
+        context = self.performer_attention(q, k, v, mask, output_attentions)
+
+        #q = q / math.sqrt(dim_per_head)  # (bs, n_heads, q_length, dim_per_head)
+        #scores = torch.matmul(q, k.transpose(2, 3))  # (bs, n_heads, q_length, k_length)
+        #mask = (mask == 0).view(mask_reshp).expand_as(scores)  # (bs, n_heads, q_length, k_length)
+        #scores.masked_fill_(mask, -float("inf"))  # (bs, n_heads, q_length, k_length)
+
+        #weights = nn.Softmax(dim=-1)(scores)  # (bs, n_heads, q_length, k_length)
+        #weights = self.dropout(weights)  # (bs, n_heads, q_length, k_length)
 
         # Mask heads if we want to
         if head_mask is not None:
-            weights = weights * head_mask
+            context = context * head_mask
 
-        context = torch.matmul(weights, v)  # (bs, n_heads, q_length, dim_per_head)
+        #context = torch.matmul(weights, v)  # (bs, n_heads, q_length, dim_per_head)
         context = unshape(context)  # (bs, q_length, dim)
         context = self.out_lin(context)  # (bs, q_length, dim)
 
-        if output_attentions:
-            return (context, weights)
-        else:
-            return (context,)
+        return (context,)
 
 
 class FFN(nn.Module):
@@ -230,7 +212,9 @@ class FFN(nn.Module):
         self.seq_len_dim = 1
         self.lin1 = nn.Linear(in_features=config.hidden_size, out_features=config.hidden_dim)
         self.lin2 = nn.Linear(in_features=config.hidden_dim, out_features=config.hidden_size)
-        assert config.activation in ["relu", "gelu"], f"activation ({config.activation}) must be in ['relu', 'gelu']"
+        assert config.activation in ["relu", "gelu"], "activation ({}) must be in ['relu', 'gelu']".format(
+            config.activation
+        )
         self.activation = gelu if config.activation == "gelu" else nn.ReLU()
 
     def forward(self, input):
@@ -249,7 +233,7 @@ class TransformerBlock(nn.Module):
         super().__init__()
 
         assert config.hidden_size % config.n_heads == 0
-
+        #self.attention = PerformerAttention(config.performer_attention_config, linear_layer_names=('q_lin', 'k_lin', 'v_lin', 'out_lin'))
         self.attention = MultiHeadSelfAttention(config)
         self.sa_layer_norm = nn.LayerNorm(normalized_shape=config.hidden_size, eps=1e-12)
 
@@ -296,7 +280,9 @@ class Transformer(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.n_layers = config.n_layers
-        self.layer = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layers)])
+
+        layer = TransformerBlock(config)
+        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(config.n_layers)])
 
     def forward(
         self, x, attn_mask=None, head_mask=None, output_attentions=False, output_hidden_states=False, return_dict=None
@@ -347,31 +333,28 @@ class Transformer(nn.Module):
 
 
 # INTERFACE FOR ENCODER AND TASK SPECIFIC MODEL #
-class DistilBertPreTrainedModel(PreTrainedModel):
+class DistilBertPerformerPreTrainedModel(PreTrainedModel):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
     models.
     """
 
-    config_class = DistilBertConfig
+    config_class = DistilBertPerformerConfig
     load_tf_weights = None
     base_model_prefix = "distilbert"
 
     def _init_weights(self, module):
         """Initialize the weights."""
+        if isinstance(module, nn.Embedding):
+            if module.weight.requires_grad:
+                module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
         if isinstance(module, nn.Linear):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
             module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
         elif isinstance(module, nn.LayerNorm):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
+        if isinstance(module, nn.Linear) and module.bias is not None:
+            module.bias.data.zero_()
 
 
 DISTILBERT_START_DOCSTRING = r"""
@@ -433,7 +416,7 @@ DISTILBERT_INPUTS_DOCSTRING = r"""
     "The bare DistilBERT encoder/transformer outputting raw hidden-states without any specific head on top.",
     DISTILBERT_START_DOCSTRING,
 )
-class DistilBertModel(DistilBertPreTrainedModel):
+class DistilBertPerformerModel(DistilBertPerformerPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
 
@@ -459,10 +442,11 @@ class DistilBertModel(DistilBertPreTrainedModel):
     @add_start_docstrings_to_model_forward(DISTILBERT_INPUTS_DOCSTRING.format("batch_size, num_choices"))
     @add_code_sample_docstrings(
         tokenizer_class=_TOKENIZER_FOR_DOC,
-        checkpoint=_CHECKPOINT_FOR_DOC,
+        checkpoint="distilbert-base-uncased",
         output_type=BaseModelOutput,
         config_class=_CONFIG_FOR_DOC,
     )
+    @add_code_sample_docstrings(tokenizer_class=_TOKENIZER_FOR_DOC, checkpoint="distilbert-base-uncased")
     def forward(
         self,
         input_ids=None,
@@ -512,11 +496,11 @@ class DistilBertModel(DistilBertPreTrainedModel):
     """DistilBert Model with a `masked language modeling` head on top. """,
     DISTILBERT_START_DOCSTRING,
 )
-class DistilBertForMaskedLM(DistilBertPreTrainedModel):
+class DistilBertPerformerForMaskedLM(DistilBertPerformerPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
 
-        self.distilbert = DistilBertModel(config)
+        self.distilbert = DistilBertPerformerModel(config)
         self.vocab_transform = nn.Linear(config.dim, config.dim)
         self.vocab_layer_norm = nn.LayerNorm(config.dim, eps=1e-12)
         self.vocab_projector = nn.Linear(config.dim, config.vocab_size)
@@ -534,7 +518,7 @@ class DistilBertForMaskedLM(DistilBertPreTrainedModel):
     @add_start_docstrings_to_model_forward(DISTILBERT_INPUTS_DOCSTRING.format("batch_size, num_choices"))
     @add_code_sample_docstrings(
         tokenizer_class=_TOKENIZER_FOR_DOC,
-        checkpoint=_CHECKPOINT_FOR_DOC,
+        checkpoint="distilbert-base-uncased",
         output_type=MaskedLMOutput,
         config_class=_CONFIG_FOR_DOC,
     )
@@ -595,23 +579,22 @@ class DistilBertForMaskedLM(DistilBertPreTrainedModel):
     """,
     DISTILBERT_START_DOCSTRING,
 )
-class DistilBertForSequenceClassification(DistilBertPreTrainedModel):
+class DistilBertPerformerForSequenceClassification(DistilBertPerformerPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         self.num_labels = config.num_labels
-        self.config = config
 
-        self.distilbert = DistilBertModel(config)
+        self.distilbert = DistilBertPerformerModel(config)
         self.pre_classifier = nn.Linear(config.dim, config.dim)
         self.classifier = nn.Linear(config.dim, config.num_labels)
         self.dropout = nn.Dropout(config.seq_classif_dropout)
 
         self.init_weights()
 
-    @add_start_docstrings_to_model_forward(DISTILBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    @add_start_docstrings_to_model_forward(DISTILBERT_INPUTS_DOCSTRING.format("batch_size, num_choices"))
     @add_code_sample_docstrings(
         tokenizer_class=_TOKENIZER_FOR_DOC,
-        checkpoint=_CHECKPOINT_FOR_DOC,
+        checkpoint="distilbert-base-uncased",
         output_type=SequenceClassifierOutput,
         config_class=_CONFIG_FOR_DOC,
     )
@@ -652,26 +635,12 @@ class DistilBertForSequenceClassification(DistilBertPreTrainedModel):
 
         loss = None
         if labels is not None:
-            if self.config.problem_type is None:
-                if self.num_labels == 1:
-                    self.config.problem_type = "regression"
-                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
-                    self.config.problem_type = "single_label_classification"
-                else:
-                    self.config.problem_type = "multi_label_classification"
-
-            if self.config.problem_type == "regression":
-                loss_fct = MSELoss()
-                if self.num_labels == 1:
-                    loss = loss_fct(logits.squeeze(), labels.squeeze())
-                else:
-                    loss = loss_fct(logits, labels)
-            elif self.config.problem_type == "single_label_classification":
-                loss_fct = CrossEntropyLoss()
+            if self.num_labels == 1:
+                loss_fct = nn.MSELoss()
+                loss = loss_fct(logits.view(-1), labels.view(-1))
+            else:
+                loss_fct = nn.CrossEntropyLoss()
                 loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
-            elif self.config.problem_type == "multi_label_classification":
-                loss_fct = BCEWithLogitsLoss()
-                loss = loss_fct(logits, labels)
 
         if not return_dict:
             output = (logits,) + distilbert_output[1:]
@@ -692,11 +661,11 @@ class DistilBertForSequenceClassification(DistilBertPreTrainedModel):
     """,
     DISTILBERT_START_DOCSTRING,
 )
-class DistilBertForQuestionAnswering(DistilBertPreTrainedModel):
+class DistilBertPerformerForQuestionAnswering(DistilBertPerformerPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
 
-        self.distilbert = DistilBertModel(config)
+        self.distilbert = DistilBertPerformerModel(config)
         self.qa_outputs = nn.Linear(config.dim, config.num_labels)
         assert config.num_labels == 2
         self.dropout = nn.Dropout(config.qa_dropout)
@@ -706,7 +675,7 @@ class DistilBertForQuestionAnswering(DistilBertPreTrainedModel):
     @add_start_docstrings_to_model_forward(DISTILBERT_INPUTS_DOCSTRING.format("batch_size, num_choices"))
     @add_code_sample_docstrings(
         tokenizer_class=_TOKENIZER_FOR_DOC,
-        checkpoint=_CHECKPOINT_FOR_DOC,
+        checkpoint="distilbert-base-uncased",
         output_type=QuestionAnsweringModelOutput,
         config_class=_CONFIG_FOR_DOC,
     )
@@ -748,8 +717,8 @@ class DistilBertForQuestionAnswering(DistilBertPreTrainedModel):
         hidden_states = self.dropout(hidden_states)  # (bs, max_query_len, dim)
         logits = self.qa_outputs(hidden_states)  # (bs, max_query_len, 2)
         start_logits, end_logits = logits.split(1, dim=-1)
-        start_logits = start_logits.squeeze(-1).contiguous()  # (bs, max_query_len)
-        end_logits = end_logits.squeeze(-1).contiguous()  # (bs, max_query_len)
+        start_logits = start_logits.squeeze(-1)  # (bs, max_query_len)
+        end_logits = end_logits.squeeze(-1)  # (bs, max_query_len)
 
         total_loss = None
         if start_positions is not None and end_positions is not None:
@@ -760,8 +729,8 @@ class DistilBertForQuestionAnswering(DistilBertPreTrainedModel):
                 end_positions = end_positions.squeeze(-1)
             # sometimes the start/end positions are outside our model inputs, we ignore these terms
             ignored_index = start_logits.size(1)
-            start_positions = start_positions.clamp(0, ignored_index)
-            end_positions = end_positions.clamp(0, ignored_index)
+            start_positions.clamp_(0, ignored_index)
+            end_positions.clamp_(0, ignored_index)
 
             loss_fct = nn.CrossEntropyLoss(ignore_index=ignored_index)
             start_loss = loss_fct(start_logits, start_positions)
@@ -788,12 +757,12 @@ class DistilBertForQuestionAnswering(DistilBertPreTrainedModel):
     """,
     DISTILBERT_START_DOCSTRING,
 )
-class DistilBertForTokenClassification(DistilBertPreTrainedModel):
+class DistilBertPerformerForTokenClassification(DistilBertPerformerPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         self.num_labels = config.num_labels
 
-        self.distilbert = DistilBertModel(config)
+        self.distilbert = DistilBertPerformerModel(config)
         self.dropout = nn.Dropout(config.dropout)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
 
@@ -802,7 +771,7 @@ class DistilBertForTokenClassification(DistilBertPreTrainedModel):
     @add_start_docstrings_to_model_forward(DISTILBERT_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
         tokenizer_class=_TOKENIZER_FOR_DOC,
-        checkpoint=_CHECKPOINT_FOR_DOC,
+        checkpoint="distilbert-base-uncased",
         output_type=TokenClassifierOutput,
         config_class=_CONFIG_FOR_DOC,
     )
@@ -867,16 +836,16 @@ class DistilBertForTokenClassification(DistilBertPreTrainedModel):
 
 @add_start_docstrings(
     """
-    DistilBert Model with a multiple choice classification head on top (a linear layer on top of the pooled output and
+    DistilBertPerformer Model with a multiple choice classification head on top (a linear layer on top of the pooled output and
     a softmax) e.g. for RocStories/SWAG tasks.
     """,
     DISTILBERT_START_DOCSTRING,
 )
-class DistilBertForMultipleChoice(DistilBertPreTrainedModel):
+class DistilBertPerformerForMultipleChoice(DistilBertPerformerPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
 
-        self.distilbert = DistilBertModel(config)
+        self.distilbert = DistilBertPerformerModel(config)
         self.pre_classifier = nn.Linear(config.dim, config.dim)
         self.classifier = nn.Linear(config.dim, 1)
         self.dropout = nn.Dropout(config.seq_classif_dropout)
@@ -908,11 +877,11 @@ class DistilBertForMultipleChoice(DistilBertPreTrainedModel):
 
         Examples::
 
-            >>> from transformers import DistilBertTokenizer, DistilBertForMultipleChoice
+            >>> from transformers import DistilBertPerformerTokenizer, DistilBertPerformerForMultipleChoice
             >>> import torch
 
-            >>> tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-cased')
-            >>> model = DistilBertForMultipleChoice.from_pretrained('distilbert-base-cased')
+            >>> tokenizer = DistilBertPerformerTokenizer.from_pretrained('distilbert-base-cased')
+            >>> model = DistilBertPerformerForMultipleChoice.from_pretrained('distilbert-base-cased')
 
             >>> prompt = "In Italy, pizza served in formal settings, such as at a restaurant, is presented unsliced."
             >>> choice0 = "It is eaten with a fork and a knife."

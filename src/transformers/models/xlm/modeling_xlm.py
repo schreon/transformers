@@ -155,7 +155,7 @@ class MultiHeadAttention(nn.Module):
         # assert dim == self.dim, f'Dimensions do not match: {dim} input vs {self.dim} configured'
         n_heads = self.n_heads
         dim_per_head = self.dim // n_heads
-        mask_reshape = (bs, 1, qlen, klen) if mask.dim() == 3 else (bs, 1, 1, klen)
+        mask_reshape = (bs, 1, qlen, klen) if mask.hidden_size() == 3 else (bs, 1, 1, klen)
 
         def shape(x):
             """projection"""

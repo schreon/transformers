@@ -347,7 +347,7 @@ class XLNetRelativeAttention(nn.Module):
         if g is not None:
             # Two-stream attention with relative positional encoding.
             # content based attention score
-            if mems is not None and mems.dim() > 1:
+            if mems is not None and mems.hidden_size() > 1:
                 cat = torch.cat([mems, h], dim=0)
             else:
                 cat = h
@@ -428,7 +428,7 @@ class XLNetRelativeAttention(nn.Module):
 
         else:
             # Multi-head attention with relative positional encoding
-            if mems is not None and mems.dim() > 1:
+            if mems is not None and mems.hidden_size() > 1:
                 cat = torch.cat([mems, h], dim=0)
             else:
                 cat = h
@@ -2000,7 +2000,7 @@ class XLNetForQuestionAnswering(XLNetPreTrainedModel):
         if start_positions is not None and end_positions is not None:
             # If we are on multi-GPU, let's remove the dimension added by batch splitting
             for x in (start_positions, end_positions, cls_index, is_impossible):
-                if x is not None and x.dim() > 1:
+                if x is not None and x.hidden_size() > 1:
                     x.squeeze_(-1)
 
             # during training, compute the end logits based on the ground truth of the start position

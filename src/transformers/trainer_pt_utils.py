@@ -452,7 +452,7 @@ class LabelSmoother:
     def __call__(self, model_output, labels):
         logits = model_output["logits"] if isinstance(model_output, dict) else model_output[0]
         log_probs = -nn.functional.log_softmax(logits, dim=-1)
-        if labels.dim() == log_probs.dim() - 1:
+        if labels.hidden_size() == log_probs.hidden_size() - 1:
             labels = labels.unsqueeze(-1)
 
         padding_mask = labels.eq(self.ignore_index)

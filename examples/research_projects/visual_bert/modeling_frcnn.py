@@ -572,7 +572,7 @@ class Matcher(object):
             matches (Tensor[int64]): a vector of length N, where matches[i] is a matched ground-truth index in [0, M)
             match_labels (Tensor[int8]): a vector of length N, where pred_labels[i] indicates true or false positive or ignored
         """
-        assert match_quality_matrix.dim() == 2
+        assert match_quality_matrix.hidden_size() == 2
         if match_quality_matrix.numel() == 0:
             default_matches = match_quality_matrix.new_full((match_quality_matrix.size(1),), 0, dtype=torch.int64)
             # When no gt boxes exist, we define IOU = 0 and therefore set labels
@@ -1640,7 +1640,7 @@ class FastRCNNOutputLayers(nn.Module):
             nn.init.constant_(item.bias, 0)
 
     def forward(self, roi_features):
-        if roi_features.dim() > 2:
+        if roi_features.hidden_size() > 2:
             roi_features = torch.flatten(roi_features, start_dim=1)
         scores = self.cls_score(roi_features)
         proposal_deltas = self.bbox_pred(roi_features)

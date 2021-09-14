@@ -914,10 +914,10 @@ class TransfoXLModel(TransfoXLPreTrainedModel):
         # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads] (a head_mask for each layer)
         # and head_mask is converted to shape [num_hidden_layers x qlen x klen x bsz x n_head]
         if head_mask is not None:
-            if head_mask.dim() == 1:
+            if head_mask.hidden_size() == 1:
                 head_mask = head_mask.unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(0)
                 head_mask = head_mask.expand(self.n_layer, -1, -1, -1, -1)
-            elif head_mask.dim() == 2:
+            elif head_mask.hidden_size() == 2:
                 head_mask = head_mask.unsqueeze(1).unsqueeze(1).unsqueeze(1)
             head_mask = head_mask.to(
                 dtype=next(self.parameters()).dtype

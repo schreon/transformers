@@ -1253,7 +1253,7 @@ class LxmertForPreTraining(LxmertPreTrainedModel):
                     visual_prediction_scores.view(-1, output_dim),
                     label.view(*label_shape),
                 )
-                if visual_loss.dim() > 1:  # Regression Losses
+                if visual_loss.hidden_size() > 1:  # Regression Losses
                     visual_loss = visual_loss.mean(1)
                 visual_loss = (visual_loss * mask_conf.view(-1)).mean() * weight
                 total_visual_loss += visual_loss

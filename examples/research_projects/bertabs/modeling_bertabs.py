@@ -215,7 +215,7 @@ class TransformerDecoder(nn.Module):
         # Pass through the embeddings
         emb = self.embeddings(input_ids)
         output = self.pos_emb(emb, step)
-        assert emb.dim() == 3  # len x batch x embedding_dim
+        assert emb.hidden_size() == 3  # len x batch x embedding_dim
 
         if state.cache is None:
             saved_inputs = []

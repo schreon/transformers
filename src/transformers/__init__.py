@@ -144,6 +144,7 @@ _import_structure = {
         "load_tf2_weights_in_pytorch_model",
     ],
     # Models
+    "models.h_transformer": ["H_TRANSFORMER_PRETRAINED_CONFIG_ARCHIVE_MAP", "HTransformerConfig", "HTransformerTokenizer"],
     "models": [],
     "models.albert": ["ALBERT_PRETRAINED_CONFIG_ARCHIVE_MAP", "AlbertConfig"],
     "models.auto": [
@@ -364,6 +365,7 @@ else:
 # tokenizers-backed objects
 if is_tokenizers_available():
     # Fast tokenizers
+    _import_structure["models.h_transformer"].append("HTransformerTokenizerFast")
     _import_structure["models.roformer"].append("RoFormerTokenizerFast")
     _import_structure["models.clip"].append("CLIPTokenizerFast")
     _import_structure["models.convbert"].append("ConvBertTokenizerFast")
@@ -520,6 +522,19 @@ if is_torch_available():
     _import_structure["modeling_utils"] = ["Conv1D", "PreTrainedModel", "apply_chunking_to_forward", "prune_layer"]
 
     # PyTorch models structure
+
+    _import_structure["models.h_transformer"].extend(
+        [
+            "H_TRANSFORMER_PRETRAINED_MODEL_ARCHIVE_LIST",
+            "HTransformerForCausalLM",
+            "HTransformerForMaskedLM",
+            "HTransformerForConditionalGeneration",
+            "HTransformerForQuestionAnswering",
+            "HTransformerForSequenceClassification",
+            "HTransformerModel",
+            "HTransformerPreTrainedModel"
+        ]
+    )
     _import_structure["models.albert"].extend(
         [
             "ALBERT_PRETRAINED_MODEL_ARCHIVE_LIST",
@@ -1932,6 +1947,7 @@ if TYPE_CHECKING:
         load_tf2_weights_in_pytorch_model,
     )
     from .models.albert import ALBERT_PRETRAINED_CONFIG_ARCHIVE_MAP, AlbertConfig
+    from .models.h_transformer import H_TRANSFORMER_PRETRAINED_CONFIG_ARCHIVE_MAP, HTransformerConfig, HTransformerTokenizer
     from .models.auto import (
         ALL_PRETRAINED_CONFIG_ARCHIVE_MAP,
         CONFIG_MAPPING,
@@ -2139,6 +2155,7 @@ if TYPE_CHECKING:
         from .utils.dummy_sentencepiece_objects import *
 
     if is_tokenizers_available():
+        from .models.h_transformer import HTransformerTokenizerFast
         from .models.albert import AlbertTokenizerFast
         from .models.bart import BartTokenizerFast
         from .models.barthez import BarthezTokenizerFast
@@ -2220,6 +2237,17 @@ if TYPE_CHECKING:
         from .utils.dummy_timm_objects import *
 
     if is_torch_available():
+
+        from .models.h_transformer import (
+            H_TRANSFORMER_PRETRAINED_MODEL_ARCHIVE_LIST,
+            HTransformerForConditionalGeneration,
+            HTransformerForMaskedLM,
+            HTransformerForCausalLM,
+            HTransformerForQuestionAnswering,
+            HTransformerForSequenceClassification,
+            HTransformerModel,
+            HTransformerPreTrainedModel,
+        )
         # Benchmarks
         from .benchmark.benchmark import PyTorchBenchmark
         from .benchmark.benchmark_args import PyTorchBenchmarkArguments

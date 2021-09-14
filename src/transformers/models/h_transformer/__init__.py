@@ -37,6 +37,7 @@ if is_torch_available():
         "HTransformerForQuestionAnswering",
         "HTransformerForSequenceClassification",
         "HTransformerForCausalLM",
+        "HTransformerForMaskedLM",
         "HTransformerModel",
         "HTransformerPreTrainedModel",
     ]

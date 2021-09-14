@@ -130,22 +130,33 @@ class HAttention1D(nn.Module):
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
         self.to_out = nn.Linear(inner_dim, dim)
 
-    def forward(self, x, mask=None):
+    #def forward(self, x, mask=None):
+    def forward(self, x, mask=None, output_attentions=False):
+        """
+        Parameters:
+            query: torch.tensor(bs, seq_length, dim)
+            key: torch.tensor(bs, seq_length, dim)
+            value: torch.tensor(bs, seq_length, dim)
+            mask: torch.tensor(bs, seq_length)
+
+        Returns:
+            weights: torch.tensor(bs, num_heads, seq_length, seq_length) Attention weights context: torch.tensor(bs,
+            seq_length, dim) Contextualized layer. Optional: only if `output_attentions=True`
+        """
         b, n, h, device, bsz, eps = *x.shape[:2], self.heads, x.device, self.block_size, self.eps
 
         # pad sequence length to power of 2
 
-        pad_to_len = 2 ** ceil(log2(n))
+        pad_to_len = 2 ** ceil(log2(max(n, 3*bsz)))
         padding = pad_to_len - n
 
         if padding != 0:
             x = F.pad(x, (0, 0, 0, padding), value=0.)
+
             if exists(mask):
                 mask = F.pad(mask, (0, padding), value=False)
 
-        # derive queries, keys, values
-
-        q, k, v = self.to_qkv(x).chunk(3, dim=-1)
+        q, k, v = self.to_qkv(x).chunk(3, dim = -1)
 
         # split out heads, and also divide sequence into blocks
 
@@ -516,26 +527,18 @@ class HTransformer1D(nn.Module):
         self.layers = execute_type(layers, args_route={**attn_route_map})
 
     def forward(self,
-                x,
-                attention_mask=None,
-                decoder_input_ids=None,
-                decoder_attention_mask=None,
-                encoder_outputs=None,
-                inputs_embeds=None,
-                decoder_inputs_embeds=None,
-                use_cache=None,
-                output_attentions=None,
-                output_hidden_states=None,
-                return_dict=None):
-        b, n, device = *x.shape, x.device
+                input_ids,
+                *args,
+                **kwargs):
+        b, n, device = *input_ids.shape, input_ids.device
         assert n <= self.max_seq_len, 'sequence length must be less than the maximum sequence length'
-        x = self.token_emb(x)
-        x = self.layers(x)
+        input_ids = self.token_emb(input_ids)
+        input_ids = self.layers(input_ids)
         # if attention_mask is not None:
         #    x *= attention_mask
 
         return Seq2SeqModelOutput(
-            last_hidden_state=x,
+            last_hidden_state=input_ids,
             past_key_values=None,
             decoder_hidden_states=None,
             decoder_attentions=None,
@@ -547,3 +550,6 @@ class HTransformer1D(nn.Module):
 
     def _init_weights(self, *args, **kwargs):
         pass
+
+    def get_input_embeddings(self):
+        return self.token_emb

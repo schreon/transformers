@@ -99,11 +99,11 @@ class XSoftmax(torch.autograd.Function):
 
     @staticmethod
     def forward(self, input, mask, dim):
-        self.dim = dim
+        self.hidden_size = dim
         rmask = ~(mask.bool())
 
         output = input.masked_fill(rmask, float("-inf"))
-        output = torch.softmax(output, self.dim)
+        output = torch.softmax(output, self.hidden_size)
         output.masked_fill_(rmask, 0)
         self.save_for_backward(output)
         return output
@@ -111,7 +111,7 @@ class XSoftmax(torch.autograd.Function):
     @staticmethod
     def backward(self, grad_output):
         (output,) = self.saved_tensors
-        inputGrad = _softmax_backward_data(grad_output, output, self.dim, output)
+        inputGrad = _softmax_backward_data(grad_output, output, self.hidden_size, output)
         return inputGrad, None, None
 
 
@@ -361,8 +361,8 @@ class ConvLayer(nn.Module):
         if input_mask is None:
             output_states = output
         else:
-            if input_mask.dim() != layer_norm_input.dim():
-                if input_mask.dim() == 4:
+            if input_mask.hidden_size() != layer_norm_input.hidden_size():
+                if input_mask.hidden_size() == 4:
                     input_mask = input_mask.squeeze(1).squeeze(1)
                 input_mask = input_mask.unsqueeze(2)
 
@@ -408,11 +408,11 @@ class DebertaV2Encoder(nn.Module):
         return rel_embeddings
 
     def get_attention_mask(self, attention_mask):
-        if attention_mask.dim() <= 2:
+        if attention_mask.hidden_size() <= 2:
             extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
             attention_mask = extended_attention_mask * extended_attention_mask.squeeze(-2).unsqueeze(-1)
             attention_mask = attention_mask.byte()
-        elif attention_mask.dim() == 3:
+        elif attention_mask.hidden_size() == 3:
             attention_mask = attention_mask.unsqueeze(1)
 
         return attention_mask
@@ -435,7 +435,7 @@ class DebertaV2Encoder(nn.Module):
         relative_pos=None,
         return_dict=True,
     ):
-        if attention_mask.dim() <= 2:
+        if attention_mask.hidden_size() <= 2:
             input_mask = attention_mask
         else:
             input_mask = (attention_mask.sum(-2) > 0).byte()
@@ -843,8 +843,8 @@ class DebertaV2Embeddings(nn.Module):
         embeddings = self.LayerNorm(embeddings)
 
         if mask is not None:
-            if mask.dim() != embeddings.dim():
-                if mask.dim() == 4:
+            if mask.hidden_size() != embeddings.hidden_size():
+                if mask.hidden_size() == 4:
                     mask = mask.squeeze(1).squeeze(1)
                 mask = mask.unsqueeze(2)
             mask = mask.to(embeddings.dtype)
@@ -1270,7 +1270,7 @@ class DebertaV2ForSequenceClassification(DebertaV2PreTrainedModel):
                 loss_fn = nn.MSELoss()
                 logits = logits.view(-1).to(labels.dtype)
                 loss = loss_fn(logits, labels.view(-1))
-            elif labels.dim() == 1 or labels.size(-1) == 1:
+            elif labels.hidden_size() == 1 or labels.size(-1) == 1:
                 label_index = (labels >= 0).nonzero()
                 labels = labels.long()
                 if label_index.size(0) > 0:
