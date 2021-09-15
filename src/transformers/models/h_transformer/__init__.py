@@ -55,11 +55,8 @@ if TYPE_CHECKING:
     if is_torch_available():
         from .modeling_h_transformer import (
             H_TRANSFORMER_PRETRAINED_MODEL_ARCHIVE_LIST,
-            HTransformerForConditionalGeneration,
-            HTransformerForCausalLM,
             HTransformerForQuestionAnswering,
-            HTransformerForSequenceClassification,
-            HTransformerModel,
+            HTransformerForMaskedLM,
             HTransformerPreTrainedModel,
         )
 

@@ -527,12 +527,8 @@ if is_torch_available():
     _import_structure["models.h_transformer"].extend(
         [
             "H_TRANSFORMER_PRETRAINED_MODEL_ARCHIVE_LIST",
-            "HTransformerForCausalLM",
             "HTransformerForMaskedLM",
-            "HTransformerForConditionalGeneration",
             "HTransformerForQuestionAnswering",
-            "HTransformerForSequenceClassification",
-            "HTransformerModel",
             "HTransformerPreTrainedModel"
         ]
     )
@@ -2243,13 +2239,8 @@ if TYPE_CHECKING:
 
         from .models.h_transformer import (
             H_TRANSFORMER_PRETRAINED_MODEL_ARCHIVE_LIST,
-            HTransformerForConditionalGeneration,
             HTransformerForMaskedLM,
-            HTransformerForCausalLM,
             HTransformerForQuestionAnswering,
-            HTransformerForSequenceClassification,
-            HTransformerModel,
-            HTransformerPreTrainedModel,
         )
         # Benchmarks
         from .benchmark.benchmark import PyTorchBenchmark
